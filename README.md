@@ -1,117 +1,82 @@
-# NASDAQ-100 Stock Tracker 📈
+NASDAQ-100 Stock Tracker 
+Automated system that tracks NASDAQ-100 stocks using Yahoo Finance API and sends email notifications on abnormal price drops.
+Features
 
-Yahoo Finance API kullanarak NASDAQ-100 hisselerini takip eden ve anormal düşüşlerde email bildirimi gönderen otomatik sistem.
+- Hourly NASDAQ-100 stock tracking
+- SQLite database storage
+- Timestamp logging for each fetch operation
+- Abnormal drop detection (default: 5%)
+- Email notifications
+- Full automation with GitHub Actions
 
-## Özellikler
-
-- ✅ NASDAQ-100 hisselerini saatlik olarak takip
-- ✅ SQLite veritabanında veri saklama
-- ✅ Her fetch işleminde timestamp kaydı
-- ✅ Anormal düşüş tespiti (varsayılan: %5)
-- ✅ Email bildirimi
-- ✅ GitHub Actions ile tam otomasyon
-
-## Kurulum
-
-### 1. Repository'yi Fork/Clone Et
-
-```bash
-git clone https://github.com/YOUR_USERNAME/nasdaq-tracker.git
+Setup
+1. Fork/Clone the Repository
+bashgit clone https://github.com/YOUR_USERNAME/nasdaq-tracker.git
 cd nasdaq-tracker
-```
+2. Configure GitHub Secrets
+Go to Repository Settings > Secrets and variables > Actions > New repository secret:
+Secret NameDescriptionEMAIL_SENDERSender email address (Gmail recommended)EMAIL_PASSWORDGmail App Password (not your regular password!)EMAIL_RECIPIENTEmail address to receive notifications
+3. Create Gmail App Password
 
-### 2. GitHub Secrets Ayarla
+Go to Google Account > Security > Enable 2-Step Verification
+Go to Google Account > Security > App passwords
+Select "Mail" and "Other", then enter a name
+Use the generated 16-character password as EMAIL_PASSWORD
 
-Repository Settings > Secrets and variables > Actions > New repository secret:
+4. (Optional) Configure Variables
+Go to Repository Settings > Secrets and variables > Actions > Variables:
+Variable NameDefaultDescriptionDROP_THRESHOLD5.0Abnormal drop threshold (%)
+Usage
+Automatic Execution
+GitHub Actions runs automatically every hour.
+Manual Execution
 
-| Secret Name | Açıklama |
-|------------|----------|
-| `EMAIL_SENDER` | Gönderen email adresi (Gmail önerilir) |
-| `EMAIL_PASSWORD` | Gmail App Password (normal şifre değil!) |
-| `EMAIL_RECIPIENT` | Bildirimlerin gönderileceği email |
+Go to the Actions tab
+Select the "NASDAQ Tracker" workflow
+Click "Run workflow"
 
-### 3. Gmail App Password Oluşturma
-
-1. Google Account > Security > 2-Step Verification'ı etkinleştir
-2. Google Account > Security > App passwords
-3. "Mail" ve "Other" seçip bir isim ver
-4. Oluşturulan 16 haneli şifreyi `EMAIL_PASSWORD` olarak kullan
-
-### 4. (Opsiyonel) Variables Ayarla
-
-Repository Settings > Secrets and variables > Actions > Variables:
-
-| Variable Name | Varsayılan | Açıklama |
-|--------------|-----------|----------|
-| `DROP_THRESHOLD` | `5.0` | Anormal düşüş eşiği (%) |
-
-## Kullanım
-
-### Otomatik Çalışma
-GitHub Actions her saat başı otomatik çalışır.
-
-### Manuel Çalıştırma
-1. Actions sekmesine git
-2. "NASDAQ Tracker" workflow'unu seç
-3. "Run workflow" butonuna tıkla
-
-### Lokal Test
-```bash
-pip install -r requirements.txt
+Local Testing
+bashpip install -r requirements.txt
 python nasdaq_tracker.py
-```
-
-## Veritabanı Şeması
-
-### stock_prices
-```sql
-- id: INTEGER PRIMARY KEY
-- symbol: TEXT (hisse sembolü)
-- date: DATE (tarih)
-- open, high, low, close, adj_close: REAL (fiyatlar)
-- volume: INTEGER (işlem hacmi)
-- fetch_timestamp: DATETIME (çekilme zamanı)
-```
-
-### fetch_logs
-```sql
-- id: INTEGER PRIMARY KEY
+Database Schema
+stock_prices
+sql- id: INTEGER PRIMARY KEY
+- symbol: TEXT (stock ticker)
+- date: DATE
+- open, high, low, close, adj_close: REAL (prices)
+- volume: INTEGER (trading volume)
+- fetch_timestamp: DATETIME (data retrieval time)
+fetch_logs
+sql- id: INTEGER PRIMARY KEY
 - fetch_timestamp: DATETIME
 - symbols_fetched: INTEGER
 - records_added: INTEGER
 - records_updated: INTEGER
 - errors: TEXT
 - duration_seconds: REAL
-```
-
-### alerts
-```sql
-- id: INTEGER PRIMARY KEY
+alerts
+sql- id: INTEGER PRIMARY KEY
 - symbol: TEXT
 - alert_type: TEXT
 - alert_message: TEXT
 - price_change_percent: REAL
 - created_at: DATETIME
 - email_sent: BOOLEAN
-```
-
-## ML Modeli için Veri Kullanımı
-
-```python
-import sqlite3
+Using Data for ML Models
+pythonimport sqlite3
 import pandas as pd
 
-# Veritabanına bağlan
+# Connect to database
 conn = sqlite3.connect('nasdaq_data.db')
 
-# Tüm verileri çek
+# Fetch all data
 df = pd.read_sql_query('''
     SELECT symbol, date, open, high, low, close, volume, fetch_timestamp
     FROM stock_prices
     ORDER BY symbol, date
 ''', conn)
 
-# Belirli bir hisse için
+# Fetch data for a specific stock
 aapl = pd.read_sql_query('''
     SELECT * FROM stock_prices 
     WHERE symbol = 'AAPL' 
@@ -119,19 +84,14 @@ aapl = pd.read_sql_query('''
 ''', conn)
 
 conn.close()
-```
-
-## Takip Edilen NASDAQ-100 Hisseleri
-
+Tracked NASDAQ-100 Stocks
 AAPL, MSFT, AMZN, NVDA, META, GOOGL, GOOG, TSLA, AVGO, COST, NFLX, AMD, PEP, ADBE, CSCO, TMUS, INTC, CMCSA, TXN, QCOM, INTU, AMGN, HON, AMAT, ISRG, BKNG, SBUX, VRTX, MDLZ, GILD, ADP, REGN, ADI, LRCX, PANW, KLAC, SNPS, MELI, CDNS, ASML, MAR, ABNB, PYPL, CRWD, ORLY, CTAS, MNST, NXPI, CSX, MRVL, PCAR, WDAY, CEG, ROP, ADSK, CPRT, DXCM, FTNT, CHTR, AEP, PAYX, ODFL, MCHP, KDP, KHC, FAST, ROST, AZN, EXC, EA, VRSK, CTSH, LULU, GEHC, IDXX, XEL, CCEP, DDOG, CSGP, BKR, TTWO, ANSS, ON, ZS, GFS, FANG, CDW, BIIB, ILMN, WBD, MDB, TEAM, MRNA, DLTR, SIRI, LCID, RIVN, ARM, SMCI, COIN
+Notes
 
-## Notlar
+GitHub Actions free tier is limited to 2,000 minutes per month
+Each run takes approximately 1-2 minutes
+Hourly execution uses ~720 minutes per month
+When NYSE is closed (weekends, holidays), data remains unchanged but the system still runs
 
-- GitHub Actions ücretsiz kullanımı ayda 2000 dakika ile sınırlı
-- Her çalışma yaklaşık 1-2 dakika sürer
-- Saatlik çalışma ile ayda ~720 dakika kullanılır
-- NYSE kapalıyken (hafta sonları, tatiller) veri değişmez ama sistem yine de çalışır
-
-## Lisans
-
+License
 MIT
