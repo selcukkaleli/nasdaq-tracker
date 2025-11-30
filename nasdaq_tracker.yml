@@ -1,0 +1,85 @@
+name: NASDAQ Tracker
+
+on:
+  schedule:
+    # Her saat başı çalışır (UTC)
+    # NYSE açık saatleri: 14:30-21:00 UTC (09:30-16:00 EST)
+    # Pre-market: 09:00-14:30 UTC
+    # Türkiye saati ile yaklaşık 17:30-00:00 arası
+    - cron: '0 * * * *'
+  
+  # Manuel tetikleme için
+  workflow_dispatch:
+
+jobs:
+  fetch-nasdaq-data:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Download existing database
+        continue-on-error: true
+        run: |
+          # Eğer önceki veritabanı varsa indir
+          if [ -f nasdaq_data.db ]; then
+            echo "Mevcut veritabanı bulundu"
+          fi
+      
+      - name: Restore database from cache
+        uses: actions/cache@v4
+        with:
+          path: nasdaq_data.db
+          key: nasdaq-db-${{ github.run_id }}
+          restore-keys: |
+            nasdaq-db-
+      
+      - name: Run NASDAQ Tracker
+        env:
+          EMAIL_SENDER: ${{ secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
+          DROP_THRESHOLD: ${{ vars.DROP_THRESHOLD || '5.0' }}
+        run: |
+          python nasdaq_tracker.py
+      
+      - name: Upload database artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nasdaq-database
+          path: nasdaq_data.db
+          retention-days: 90
+      
+      - name: Commit database to repo (optional)
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          
+          # Veritabanını repo'ya ekle (opsiyonel - büyük dosyalar için önerilmez)
+          if [ -f nasdaq_data.db ]; then
+            # Dosya boyutunu kontrol et (50MB'dan küçükse commit et)
+            FILE_SIZE=$(stat -c%s "nasdaq_data.db" 2>/dev/null || stat -f%z "nasdaq_data.db")
+            MAX_SIZE=52428800  # 50MB
+            
+            if [ "$FILE_SIZE" -lt "$MAX_SIZE" ]; then
+              git add nasdaq_data.db
+              git diff --staged --quiet || git commit -m "Update NASDAQ data - $(date -u +'%Y-%m-%d %H:%M UTC')"
+              git push
+            else
+              echo "Database too large for git commit, using artifacts only"
+            fi
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
