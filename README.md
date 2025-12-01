@@ -4,27 +4,31 @@ An automated system that tracks NASDAQ-100 stocks using Yahoo Finance API, store
 
 ## Features
 
-- Real-time price tracking for NASDAQ-100 stocks (hourly)
-- SQLite database storage with timestamps for each fetch
-- Dual alert system: daily drops and hourly drops
+- Real-time price tracking for NASDAQ-100 stocks (every 10 minutes during market hours)
+- Smart data storage: only saves when prices actually change
+- All timestamps in EST (America/New_York) for consistency with NASDAQ trading hours
+- Dual alert system: daily drops and intraday drops
 - Email notifications for significant price movements
 - Full automation via GitHub Actions
 - Historical data accumulation for machine learning applications
 
 ## How It Works
 
-The tracker fetches current market prices every hour and compares them against:
+The tracker runs every 10 minutes during NYSE/NASDAQ market hours (Mon-Fri, 09:30-16:00 EST) and:
 
-1. Previous close price (daily drop detection)
-2. Price from the last hour (hourly drop detection)
+1. Fetches current market prices from Yahoo Finance
+2. Compares against previous close (daily drop detection)
+3. Compares against last recorded price (intraday drop detection)
+4. Saves only if price has changed (avoids duplicate data)
+5. Sends email alert if drop exceeds threshold
 
-When a stock drops below the configured threshold, an email alert is sent with details about the affected stocks.
+The system automatically skips execution during weekends and outside market hours to conserve GitHub Actions minutes.
 
 ## Database Schema
 
 ### realtime_prices
 
-Stores current price snapshots taken every hour.
+Stores price snapshots taken every 10 minutes during market hours.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -36,24 +40,24 @@ Stores current price snapshots taken every hour.
 | day_low | REAL | Current day low |
 | volume | INTEGER | Trading volume |
 | market_cap | REAL | Market capitalization |
-| fetch_timestamp | DATETIME | When the data was fetched |
+| market_state | TEXT | REGULAR, PRE, POST, or CLOSED |
+| fetch_timestamp | DATETIME | When the data was fetched (EST) |
 
-### daily_prices
+### fetch_logs
 
-Stores historical daily OHLCV data.
+Tracks each fetch operation for monitoring.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER | Primary key |
-| symbol | TEXT | Stock ticker symbol |
-| date | DATE | Trading date |
-| open | REAL | Opening price |
-| high | REAL | Daily high |
-| low | REAL | Daily low |
-| close | REAL | Closing price |
-| adj_close | REAL | Adjusted closing price |
-| volume | INTEGER | Trading volume |
-| fetch_timestamp | DATETIME | When the data was fetched |
+| fetch_timestamp | DATETIME | Operation timestamp (EST) |
+| fetch_type | TEXT | REALTIME, SKIPPED |
+| market_state | TEXT | Market state at fetch time |
+| symbols_fetched | INTEGER | Number of symbols processed |
+| records_added | INTEGER | Records inserted (price changed) |
+| records_skipped | INTEGER | Records skipped (price unchanged) |
+| errors | TEXT | Any errors encountered |
+| duration_seconds | REAL | Operation duration |
 
 ### alerts
 
@@ -68,22 +72,8 @@ Logs all triggered alerts.
 | price_change_percent | REAL | Percentage change |
 | current_price | REAL | Price at alert time |
 | previous_price | REAL | Reference price |
-| created_at | DATETIME | Alert timestamp |
+| created_at | DATETIME | Alert timestamp (EST) |
 | email_sent | BOOLEAN | Whether email was sent |
-
-### fetch_logs
-
-Tracks each fetch operation for monitoring.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | INTEGER | Primary key |
-| fetch_timestamp | DATETIME | Operation timestamp |
-| fetch_type | TEXT | Type of fetch operation |
-| symbols_fetched | INTEGER | Number of symbols processed |
-| records_added | INTEGER | Records inserted |
-| errors | TEXT | Any errors encountered |
-| duration_seconds | REAL | Operation duration |
 
 ## Installation
 
@@ -118,13 +108,16 @@ Navigate to repository Settings, then Secrets and variables, then Actions, then 
 | Variable Name | Default | Description |
 |---------------|---------|-------------|
 | DROP_THRESHOLD | 5.0 | Daily drop threshold percentage |
-| HOURLY_DROP_THRESHOLD | 3.0 | Hourly drop threshold percentage |
+| HOURLY_DROP_THRESHOLD | 3.0 | Intraday drop threshold percentage |
 
 ## Usage
 
 ### Automatic Execution
 
-GitHub Actions runs the tracker every hour automatically via cron schedule.
+GitHub Actions runs the tracker every 10 minutes during market hours:
+
+- Schedule: Every 10 minutes, Monday-Friday, 09:30-16:00 EST (14:30-21:00 UTC)
+- Skips weekends and outside market hours automatically
 
 ### Manual Execution
 
@@ -147,22 +140,22 @@ import pandas as pd
 
 conn = sqlite3.connect('nasdaq_data.db')
 
-# Get all real-time price history
+# Get all real-time price history (only actual price changes)
 df = pd.read_sql_query('''
-    SELECT symbol, price, previous_close, volume, fetch_timestamp
+    SELECT symbol, price, previous_close, volume, market_state, fetch_timestamp
     FROM realtime_prices
     ORDER BY symbol, fetch_timestamp
 ''', conn)
 
-# Get hourly prices for a specific stock
+# Get prices for a specific stock during regular market hours only
 aapl = pd.read_sql_query('''
-    SELECT price, fetch_timestamp 
+    SELECT price, volume, fetch_timestamp 
     FROM realtime_prices 
-    WHERE symbol = 'AAPL' 
+    WHERE symbol = 'AAPL' AND market_state = 'REGULAR'
     ORDER BY fetch_timestamp
 ''', conn)
 
-# Calculate hourly returns
+# Calculate returns
 aapl['return'] = aapl['price'].pct_change()
 
 conn.close()
@@ -170,27 +163,24 @@ conn.close()
 
 ## Tracked Stocks
 
-The tracker monitors all NASDAQ-100 components including:
+The tracker monitors all NASDAQ-100 components:
 
 AAPL, MSFT, AMZN, NVDA, META, GOOGL, GOOG, TSLA, AVGO, COST, NFLX, AMD, PEP, ADBE, CSCO, TMUS, INTC, CMCSA, TXN, QCOM, INTU, AMGN, HON, AMAT, ISRG, BKNG, SBUX, VRTX, MDLZ, GILD, ADP, REGN, ADI, LRCX, PANW, KLAC, SNPS, MELI, CDNS, ASML, MAR, ABNB, PYPL, CRWD, ORLY, CTAS, MNST, NXPI, CSX, MRVL, PCAR, WDAY, CEG, ROP, ADSK, CPRT, DXCM, FTNT, CHTR, AEP, PAYX, ODFL, MCHP, KDP, KHC, FAST, ROST, AZN, EXC, EA, VRSK, CTSH, LULU, GEHC, IDXX, XEL, CCEP, DDOG, CSGP, BKR, TTWO, ANSS, ON, ZS, GFS, FANG, CDW, BIIB, ILMN, WBD, MDB, TEAM, MRNA, DLTR, SIRI, LCID, RIVN, ARM, SMCI, COIN
 
 ## Resource Usage
 
 - GitHub Actions free tier: 2000 minutes per month
-- Each run: approximately 1-2 minutes
-- Hourly schedule: approximately 720 minutes per month
+- Each run: approximately 1 minute
+- Schedule: ~42 runs per day, only on trading days
+- Monthly usage: approximately 900 minutes (well within free tier)
 
 ## Market Hours Reference
-
-NYSE and NASDAQ trading hours:
 
 | Timezone | Market Open | Market Close |
 |----------|-------------|--------------|
 | EST | 09:30 | 16:00 |
 | UTC | 14:30 | 21:00 |
 | Turkey (TRT) | 17:30 | 00:00 |
-
-The tracker runs every hour regardless of market status. During off-hours, prices remain unchanged but the system continues to log data points.
 
 ## License
 
