@@ -1,28 +1,33 @@
 """
-NASDAQ-100 Stock Tracker v2 - Real-time Price Tracking
-=======================================================
-Yahoo Finance API ile NASDAQ-100 hisselerinin ANLIK fiyatlarını çekip SQLite'a kaydeder.
-Saatlik bazda anormal düşüşlerde email bildirimi gönderir.
+NASDAQ-100 Stock Tracker v3 - Smart Real-time Price Tracking
+=============================================================
+Yahoo Finance API ile NASDAQ-100 hisselerinin ANLIK fiyatlarini cekip SQLite'a kaydeder.
+Sadece piyasa acikken ve fiyat degistiginde kayit yapar.
+Anormal dususlerde email bildirimi gonderir.
 """
 
 import yfinance as yf
 import sqlite3
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, time
 import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import logging
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from backports.zoneinfo import ZoneInfo
 
-# Logging ayarları
+# Logging ayarlari
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# NASDAQ-100 sembolleri (en büyük 100 şirket)
+# NASDAQ-100 sembolleri
 NASDAQ_100_SYMBOLS = [
     "AAPL", "MSFT", "AMZN", "NVDA", "META", "GOOGL", "GOOG", "TSLA", "AVGO", "COST",
     "NFLX", "AMD", "PEP", "ADBE", "CSCO", "TMUS", "INTC", "CMCSA", "TXN", "QCOM",
@@ -36,29 +41,77 @@ NASDAQ_100_SYMBOLS = [
     "MDB", "TEAM", "MRNA", "DLTR", "SIRI", "LCID", "RIVN", "ARM", "SMCI", "COIN"
 ]
 
-# Veritabanı yolu
+# Veritabani yolu
 DB_PATH = os.environ.get('DB_PATH', 'nasdaq_data.db')
 
-# Email ayarları (GitHub Secrets'tan alınacak)
+# Email ayarlari
 EMAIL_SENDER = os.environ.get('EMAIL_SENDER', '')
 EMAIL_PASSWORD = os.environ.get('EMAIL_PASSWORD', '')
 EMAIL_RECIPIENT = os.environ.get('EMAIL_RECIPIENT', '')
 SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 
-# Anormal düşüş eşiği (yüzde olarak)
+# Dusus esikleri
 DROP_THRESHOLD = float(os.environ.get('DROP_THRESHOLD', '5.0'))
-
-# Saatlik düşüş eşiği (daha hassas)
 HOURLY_DROP_THRESHOLD = float(os.environ.get('HOURLY_DROP_THRESHOLD', '3.0'))
 
 
+def get_market_status() -> dict:
+    """
+    NYSE/NASDAQ piyasa durumunu kontrol eder.
+    Piyasa saatleri: Pazartesi-Cuma, 09:30-16:00 EST
+    Pre-market: 04:00-09:30 EST
+    After-hours: 16:00-20:00 EST
+    """
+    try:
+        est = ZoneInfo('America/New_York')
+        now_est = datetime.now(est)
+        
+        # Hafta sonu kontrolu (0=Pazartesi, 6=Pazar)
+        weekday = now_est.weekday()
+        is_weekday = weekday < 5
+        
+        # Saat kontrolu
+        current_time = now_est.time()
+        
+        market_open = time(9, 30)
+        market_close = time(16, 0)
+        pre_market_open = time(4, 0)
+        after_hours_close = time(20, 0)
+        
+        is_regular_hours = market_open <= current_time <= market_close
+        is_extended_hours = (pre_market_open <= current_time < market_open) or \
+                           (market_close < current_time <= after_hours_close)
+        
+        # Piyasa acik mi?
+        is_open = is_weekday and (is_regular_hours or is_extended_hours)
+        
+        return {
+            'is_open': is_open,
+            'is_regular_hours': is_weekday and is_regular_hours,
+            'is_extended_hours': is_weekday and is_extended_hours,
+            'is_weekday': is_weekday,
+            'current_time_est': now_est.strftime('%Y-%m-%d %H:%M:%S EST'),
+            'weekday': weekday
+        }
+    except Exception as e:
+        logger.warning(f"Piyasa durumu kontrol edilemedi: {e}")
+        return {
+            'is_open': True,
+            'is_regular_hours': True,
+            'is_extended_hours': False,
+            'is_weekday': True,
+            'current_time_est': 'Unknown',
+            'error': str(e)
+        }
+
+
 def init_database():
-    """Veritabanı tablolarını oluşturur."""
+    """Veritabani tablolarini olusturur."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # Anlık fiyat tablosu (her saat kaydedilecek)
+    # Anlik fiyat tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS realtime_prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -69,24 +122,8 @@ def init_database():
             day_low REAL,
             volume INTEGER,
             market_cap REAL,
+            market_state TEXT,
             fetch_timestamp DATETIME NOT NULL
-        )
-    ''')
-    
-    # Günlük kapanış verileri (historical data için)
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS daily_prices (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT NOT NULL,
-            date DATE NOT NULL,
-            open REAL,
-            high REAL,
-            low REAL,
-            close REAL,
-            adj_close REAL,
-            volume INTEGER,
-            fetch_timestamp DATETIME NOT NULL,
-            UNIQUE(symbol, date)
         )
     ''')
     
@@ -95,9 +132,11 @@ def init_database():
         CREATE TABLE IF NOT EXISTS fetch_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             fetch_timestamp DATETIME NOT NULL,
-            fetch_type TEXT NOT NULL,
+            fetch_type TEXT,
+            market_state TEXT,
             symbols_fetched INTEGER,
             records_added INTEGER,
+            records_skipped INTEGER,
             errors TEXT,
             duration_seconds REAL
         )
@@ -118,33 +157,50 @@ def init_database():
         )
     ''')
     
-    # İndeksler
+    # Indeksler
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_symbol ON realtime_prices(symbol)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_timestamp ON realtime_prices(fetch_timestamp)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_symbol ON daily_prices(symbol)')
-    cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_date ON daily_prices(date)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_symbol_timestamp ON realtime_prices(symbol, fetch_timestamp)')
     
     conn.commit()
     conn.close()
-    logger.info("Veritabanı başarıyla hazırlandı.")
+    logger.info("Veritabani hazir.")
+
+
+def get_last_prices() -> dict:
+    """Her sembol icin son kaydedilen fiyati getirir."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT symbol, price, fetch_timestamp
+        FROM realtime_prices
+        WHERE id IN (
+            SELECT MAX(id) FROM realtime_prices GROUP BY symbol
+        )
+    ''')
+    
+    last_prices = {}
+    for row in cursor.fetchall():
+        last_prices[row[0]] = {'price': row[1], 'timestamp': row[2]}
+    
+    conn.close()
+    return last_prices
 
 
 def fetch_realtime_prices(symbols: list) -> list:
     """
-    Yahoo Finance'den ANLIK fiyatları çeker.
-    
-    Args:
-        symbols: Hisse sembolleri listesi
-    
-    Returns:
-        List of dictionaries with realtime data
+    Yahoo Finance'den ANLIK fiyatlari ceker.
+    All timestamps are in EST (America/New_York) for consistency with NASDAQ trading hours.
     """
-    logger.info(f"{len(symbols)} hisse için anlık fiyatlar çekiliyor...")
+    logger.info(f"{len(symbols)} hisse icin anlik fiyatlar cekiliyor...")
     
     results = []
-    fetch_timestamp = datetime.now().isoformat()
+    # Use EST timezone for all timestamps (NASDAQ timezone)
+    est = ZoneInfo('America/New_York')
+    fetch_timestamp = datetime.now(est).strftime('%Y-%m-%dT%H:%M:%S EST')
     
-    # Batch halinde çek (daha verimli)
+    # Batch halinde cek
     tickers = yf.Tickers(' '.join(symbols))
     
     for symbol in symbols:
@@ -152,90 +208,112 @@ def fetch_realtime_prices(symbols: list) -> list:
             ticker = tickers.tickers.get(symbol)
             if ticker is None:
                 continue
-                
+            
             info = ticker.info
             
-            # Anlık fiyat bilgilerini al
-            current_price = info.get('regularMarketPrice') or info.get('currentPrice')
+            # Piyasa durumu
+            market_state = info.get('marketState', 'UNKNOWN')
+            
+            # Anlik fiyat - piyasa durumuna gore
+            if market_state == 'REGULAR':
+                current_price = info.get('regularMarketPrice')
+            elif market_state in ['PRE', 'PREPRE']:
+                current_price = info.get('preMarketPrice') or info.get('regularMarketPrice')
+            elif market_state in ['POST', 'POSTPOST']:
+                current_price = info.get('postMarketPrice') or info.get('regularMarketPrice')
+            else:
+                current_price = info.get('regularMarketPrice') or info.get('currentPrice')
             
             if current_price is None:
-                # Fast info dene
-                fast_info = ticker.fast_info
-                current_price = getattr(fast_info, 'last_price', None)
+                try:
+                    fast_info = ticker.fast_info
+                    current_price = getattr(fast_info, 'last_price', None)
+                except:
+                    pass
             
             if current_price is None:
-                logger.warning(f"{symbol}: Fiyat bilgisi alınamadı")
+                logger.warning(f"{symbol}: Fiyat bilgisi alinamadi")
                 continue
             
             results.append({
                 'symbol': symbol,
-                'price': current_price,
+                'price': float(current_price),
                 'previous_close': info.get('previousClose') or info.get('regularMarketPreviousClose'),
                 'day_high': info.get('dayHigh') or info.get('regularMarketDayHigh'),
                 'day_low': info.get('dayLow') or info.get('regularMarketDayLow'),
                 'volume': info.get('volume') or info.get('regularMarketVolume'),
                 'market_cap': info.get('marketCap'),
+                'market_state': market_state,
                 'fetch_timestamp': fetch_timestamp
             })
             
         except Exception as e:
-            logger.error(f"{symbol} için hata: {e}")
+            logger.error(f"{symbol} icin hata: {e}")
             continue
     
-    logger.info(f"{len(results)} hisse için anlık fiyat alındı.")
+    logger.info(f"{len(results)} hisse icin fiyat alindi.")
     return results
 
 
-def save_realtime_prices(prices: list) -> int:
+def save_realtime_prices(prices: list, last_prices: dict) -> tuple:
     """
-    Anlık fiyatları veritabanına kaydeder.
+    Anlik fiyatlari veritabanina kaydeder.
+    Sadece fiyat degismisse kayit yapar.
     
     Returns:
-        Number of records added
+        (records_added, records_skipped)
     """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
     records_added = 0
+    records_skipped = 0
     
     for price_data in prices:
+        symbol = price_data['symbol']
+        current_price = price_data['price']
+        
+        # Son fiyatla karsilastir
+        last = last_prices.get(symbol)
+        
+        if last:
+            last_price = last['price']
+            # Fiyat degismemisse kaydetme (kucuk tolerans ile)
+            if abs(current_price - last_price) < 0.001:
+                records_skipped += 1
+                continue
+        
         try:
             cursor.execute('''
                 INSERT INTO realtime_prices 
-                (symbol, price, previous_close, day_high, day_low, volume, market_cap, fetch_timestamp)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                (symbol, price, previous_close, day_high, day_low, volume, market_cap, market_state, fetch_timestamp)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                price_data['symbol'],
-                price_data['price'],
+                symbol,
+                current_price,
                 price_data['previous_close'],
                 price_data['day_high'],
                 price_data['day_low'],
                 price_data['volume'],
                 price_data['market_cap'],
+                price_data['market_state'],
                 price_data['fetch_timestamp']
             ))
             records_added += 1
         except Exception as e:
-            logger.error(f"Kayıt hatası {price_data['symbol']}: {e}")
+            logger.error(f"Kayit hatasi {symbol}: {e}")
     
     conn.commit()
     conn.close()
     
-    logger.info(f"{records_added} anlık fiyat kaydedildi.")
-    return records_added
+    logger.info(f"Kaydedilen: {records_added}, Atlanan (ayni fiyat): {records_skipped}")
+    return records_added, records_skipped
 
 
-def check_for_anomalies(current_prices: list) -> list:
+def check_for_anomalies(current_prices: list, last_prices: dict) -> list:
     """
-    Anlık fiyatlarda anormal düşüş olup olmadığını kontrol eder.
-    
-    1. Günlük düşüş: previous_close'a göre
-    2. Saatlik düşüş: Son 1 saatteki kayda göre
-    
-    Returns:
-        List of anomaly dictionaries
+    Anlik fiyatlarda anormal dusus olup olmadigini kontrol eder.
     """
-    conn = sqlite3.connect(DB_PATH)
     anomalies = []
     
     for price_data in current_prices:
@@ -243,7 +321,7 @@ def check_for_anomalies(current_prices: list) -> list:
         current_price = price_data['price']
         previous_close = price_data['previous_close']
         
-        # 1. Günlük düşüş kontrolü (previous close'a göre)
+        # 1. Gunluk dusus kontrolu (previous close'a gore)
         if previous_close and previous_close > 0:
             daily_change = ((current_price - previous_close) / previous_close) * 100
             
@@ -254,47 +332,35 @@ def check_for_anomalies(current_prices: list) -> list:
                     'change_percent': round(daily_change, 2),
                     'current_price': round(current_price, 2),
                     'previous_price': round(previous_close, 2),
-                    'timeframe': 'Günlük (önceki kapanışa göre)'
+                    'timeframe': 'Daily (vs previous close)'
                 })
         
-        # 2. Saatlik düşüş kontrolü (son 1 saatteki kayda göre)
-        cursor = conn.cursor()
-        cursor.execute('''
-            SELECT price, fetch_timestamp 
-            FROM realtime_prices 
-            WHERE symbol = ? 
-              AND fetch_timestamp < ?
-              AND fetch_timestamp > datetime(?, '-2 hours')
-            ORDER BY fetch_timestamp DESC 
-            LIMIT 1
-        ''', (symbol, price_data['fetch_timestamp'], price_data['fetch_timestamp']))
-        
-        row = cursor.fetchone()
-        if row:
-            last_hour_price = row[0]
-            last_timestamp = row[1]
+        # 2. Saatlik dusus kontrolu (son kaydedilen fiyata gore)
+        last = last_prices.get(symbol)
+        if last and last['price'] > 0:
+            last_price = last['price']
+            hourly_change = ((current_price - last_price) / last_price) * 100
             
-            if last_hour_price and last_hour_price > 0:
-                hourly_change = ((current_price - last_hour_price) / last_hour_price) * 100
-                
-                if hourly_change <= -HOURLY_DROP_THRESHOLD:
-                    anomalies.append({
-                        'symbol': symbol,
-                        'alert_type': 'HOURLY_DROP',
-                        'change_percent': round(hourly_change, 2),
-                        'current_price': round(current_price, 2),
-                        'previous_price': round(last_hour_price, 2),
-                        'timeframe': f'Saatlik ({last_timestamp} den beri)'
-                    })
+            if hourly_change <= -HOURLY_DROP_THRESHOLD:
+                anomalies.append({
+                    'symbol': symbol,
+                    'alert_type': 'HOURLY_DROP',
+                    'change_percent': round(hourly_change, 2),
+                    'current_price': round(current_price, 2),
+                    'previous_price': round(last_price, 2),
+                    'timeframe': f'Hourly (since {last["timestamp"]})'
+                })
     
-    conn.close()
     return anomalies
 
 
 def save_alert(anomaly: dict):
-    """Alerti veritabanına kaydeder."""
+    """Alerti veritabanina kaydeder. All timestamps in EST."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    est = ZoneInfo('America/New_York')
+    timestamp_est = datetime.now(est).strftime('%Y-%m-%dT%H:%M:%S EST')
     
     cursor.execute('''
         INSERT INTO alerts (symbol, alert_type, alert_message, price_change_percent, 
@@ -303,11 +369,11 @@ def save_alert(anomaly: dict):
     ''', (
         anomaly['symbol'],
         anomaly['alert_type'],
-        f"{anomaly['timeframe']}: {anomaly['change_percent']}% düşüş",
+        f"{anomaly['timeframe']}: {anomaly['change_percent']}% drop",
         anomaly['change_percent'],
         anomaly['current_price'],
         anomaly['previous_price'],
-        datetime.now().isoformat()
+        timestamp_est
     ))
     
     conn.commit()
@@ -315,17 +381,15 @@ def save_alert(anomaly: dict):
 
 
 def send_alert_email(anomalies: list) -> bool:
-    """
-    Anormal düşüşler için email gönderir.
-    """
+    """Anormal dususler icin email gonderir."""
     if not all([EMAIL_SENDER, EMAIL_PASSWORD, EMAIL_RECIPIENT]):
-        logger.warning("Email ayarları eksik, email gönderilmeyecek.")
+        logger.warning("Email ayarlari eksik.")
         return False
     
     if not anomalies:
         return False
     
-    # Duplicate alert kontrolü - aynı hisse için son 1 saat içinde alert gönderilmiş mi?
+    # Son 1 saat icinde ayni alert gonderilmis mi?
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
@@ -345,11 +409,13 @@ def send_alert_email(anomalies: list) -> bool:
     conn.close()
     
     if not new_anomalies:
-        logger.info("Tüm alertler zaten gönderilmiş, yeni email gönderilmeyecek.")
+        logger.info("Tum alertler zaten gonderilmis.")
         return False
     
-    # Email içeriği oluştur
-    subject = f"🚨 NASDAQ Alert: {len(new_anomalies)} hissede anormal düşüş!"
+    subject = f"NASDAQ Alert: {len(new_anomalies)} stock(s) with significant drop"
+    
+    est = ZoneInfo('America/New_York')
+    current_time_est = datetime.now(est).strftime('%Y-%m-%d %H:%M:%S EST')
     
     html_content = f"""
     <html>
@@ -360,64 +426,48 @@ def send_alert_email(anomalies: list) -> bool:
             th, td {{ border: 1px solid #ddd; padding: 12px; text-align: left; }}
             th {{ background-color: #d32f2f; color: white; }}
             .negative {{ color: red; font-weight: bold; }}
-            .daily {{ background-color: #ffebee; }}
-            .hourly {{ background-color: #fff3e0; }}
-            h2 {{ color: #333; }}
         </style>
     </head>
     <body>
-        <h2>🚨 NASDAQ Anormal Düşüş Uyarısı</h2>
-        <p><strong>Zaman:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} UTC</p>
-        <p>Aşağıdaki hisselerde önemli düşüş tespit edildi:</p>
+        <h2>NASDAQ Price Drop Alert</h2>
+        <p><strong>Time:</strong> {current_time_est}</p>
         <table>
             <tr>
-                <th>Sembol</th>
-                <th>Alert Tipi</th>
-                <th>Değişim (%)</th>
-                <th>Güncel Fiyat</th>
-                <th>Önceki Fiyat</th>
-                <th>Zaman Dilimi</th>
+                <th>Symbol</th>
+                <th>Alert Type</th>
+                <th>Change</th>
+                <th>Current Price</th>
+                <th>Previous Price</th>
             </tr>
     """
     
     for anomaly in new_anomalies:
-        row_class = 'daily' if anomaly['alert_type'] == 'DAILY_DROP' else 'hourly'
-        alert_type_text = 'Günlük Düşüş' if anomaly['alert_type'] == 'DAILY_DROP' else 'Saatlik Düşüş'
-        
+        alert_type_text = 'Daily Drop' if anomaly['alert_type'] == 'DAILY_DROP' else 'Hourly Drop'
         html_content += f"""
-            <tr class="{row_class}">
+            <tr>
                 <td><strong>{anomaly['symbol']}</strong></td>
                 <td>{alert_type_text}</td>
                 <td class="negative">{anomaly['change_percent']}%</td>
                 <td>${anomaly['current_price']}</td>
                 <td>${anomaly['previous_price']}</td>
-                <td>{anomaly['timeframe']}</td>
             </tr>
         """
-        
-        # Alert'i veritabanına kaydet
         save_alert(anomaly)
     
     html_content += """
         </table>
         <p style="margin-top: 20px; color: #666;">
-            <strong>Eşik Değerleri:</strong><br>
-            - Günlük düşüş eşiği: %{daily_threshold}<br>
-            - Saatlik düşüş eşiği: %{hourly_threshold}
-        </p>
-        <p style="color: #999;">
-            Bu otomatik bir bildirimdir. NASDAQ Tracker tarafından gönderilmiştir.
+            Thresholds: Daily {daily}%, Hourly {hourly}%
         </p>
     </body>
     </html>
-    """.format(daily_threshold=DROP_THRESHOLD, hourly_threshold=HOURLY_DROP_THRESHOLD)
+    """.format(daily=DROP_THRESHOLD, hourly=HOURLY_DROP_THRESHOLD)
     
     try:
         msg = MIMEMultipart('alternative')
         msg['Subject'] = subject
         msg['From'] = EMAIL_SENDER
         msg['To'] = EMAIL_RECIPIENT
-        
         msg.attach(MIMEText(html_content, 'html'))
         
         with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
@@ -425,7 +475,7 @@ def send_alert_email(anomalies: list) -> bool:
             server.login(EMAIL_SENDER, EMAIL_PASSWORD)
             server.sendmail(EMAIL_SENDER, EMAIL_RECIPIENT, msg.as_string())
         
-        # Email gönderildi olarak işaretle
+        # Email gonderildi olarak isaretle
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('''
@@ -435,123 +485,117 @@ def send_alert_email(anomalies: list) -> bool:
         conn.commit()
         conn.close()
         
-        logger.info(f"Alert emaili başarıyla gönderildi: {len(new_anomalies)} anomali")
+        logger.info(f"Alert emaili gonderildi: {len(new_anomalies)} anomali")
         return True
         
     except Exception as e:
-        logger.error(f"Email gönderme hatası: {e}")
+        logger.error(f"Email hatasi: {e}")
         return False
 
 
-def log_fetch_operation(fetch_type: str, symbols_count: int, records_added: int, 
-                        errors: str, duration: float):
-    """Fetch işlemini logla."""
+def log_fetch_operation(fetch_type: str, market_state: str, symbols_count: int, 
+                        records_added: int, records_skipped: int, errors: str, duration: float):
+    """Fetch islemini logla. All timestamps in EST."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    est = ZoneInfo('America/New_York')
+    timestamp_est = datetime.now(est).strftime('%Y-%m-%dT%H:%M:%S EST')
+    
     cursor.execute('''
         INSERT INTO fetch_logs 
-        (fetch_timestamp, fetch_type, symbols_fetched, records_added, errors, duration_seconds)
-        VALUES (?, ?, ?, ?, ?, ?)
-    ''', (datetime.now().isoformat(), fetch_type, symbols_count, records_added, errors, duration))
+        (fetch_timestamp, fetch_type, market_state, symbols_fetched, records_added, records_skipped, errors, duration_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (timestamp_est, fetch_type, market_state, symbols_count, records_added, records_skipped, errors, duration))
     
     conn.commit()
     conn.close()
 
 
-def get_market_status() -> dict:
-    """
-    Piyasa durumunu kontrol eder.
-    NYSE/NASDAQ: Pazartesi-Cuma, 09:30-16:00 EST
-    """
-    from datetime import timezone
-    import pytz
-    
-    try:
-        est = pytz.timezone('US/Eastern')
-        now_est = datetime.now(est)
-        
-        # Hafta sonu kontrolü (0=Pazartesi, 6=Pazar)
-        is_weekday = now_est.weekday() < 5
-        
-        # Saat kontrolü
-        market_open = now_est.replace(hour=9, minute=30, second=0, microsecond=0)
-        market_close = now_est.replace(hour=16, minute=0, second=0, microsecond=0)
-        is_market_hours = market_open <= now_est <= market_close
-        
-        return {
-            'is_open': is_weekday and is_market_hours,
-            'is_weekday': is_weekday,
-            'is_market_hours': is_market_hours,
-            'current_time_est': now_est.strftime('%Y-%m-%d %H:%M:%S EST')
-        }
-    except:
-        # pytz yoksa basit kontrol
-        return {'is_open': True, 'note': 'Could not determine market status'}
-
-
 def main():
     """Ana fonksiyon."""
-    start_time = datetime.now()
+    est = ZoneInfo('America/New_York')
+    start_time = datetime.now(est)
     logger.info("=" * 60)
-    logger.info(f"NASDAQ Tracker v2 başlatılıyor - {start_time.isoformat()}")
+    logger.info(f"NASDAQ Tracker v3 - {start_time.strftime('%Y-%m-%d %H:%M:%S EST')}")
     logger.info("=" * 60)
     
     errors = []
+    records_added = 0
+    records_skipped = 0
     
     try:
-        # Piyasa durumunu kontrol et
+        # 1. Piyasa durumunu kontrol et
         market_status = get_market_status()
-        logger.info(f"Piyasa durumu: {market_status}")
+        logger.info(f"Market status: {market_status}")
         
-        # 1. Veritabanını hazırla
+        # Piyasa kapali ve haftasonuysa calisma
+        if not market_status['is_open']:
+            if not market_status['is_weekday']:
+                logger.info("Weekend - skipping data fetch.")
+                log_fetch_operation('SKIPPED', 'WEEKEND', 0, 0, 0, None, 0)
+                return
+            else:
+                logger.info("Market closed - skipping data fetch.")
+                log_fetch_operation('SKIPPED', 'CLOSED', 0, 0, 0, None, 0)
+                return
+        
+        # 2. Veritabanini hazirla
         init_database()
         
-        # 2. Anlık fiyatları çek
+        # 3. Son fiyatlari al (karsilastirma icin)
+        last_prices = get_last_prices()
+        logger.info(f"Onceki kayit sayisi: {len(last_prices)} sembol")
+        
+        # 4. Anlik fiyatlari cek
         realtime_prices = fetch_realtime_prices(NASDAQ_100_SYMBOLS)
         
         if not realtime_prices:
-            errors.append("Anlık fiyat çekilemedi")
-            logger.error("Anlık fiyat çekilemedi!")
+            errors.append("No price data fetched")
+            logger.error("Fiyat verisi alinamadi!")
             return
         
-        # 3. Veritabanına kaydet
-        records_added = save_realtime_prices(realtime_prices)
+        # 5. Veritabanina kaydet (sadece degisenleri)
+        records_added, records_skipped = save_realtime_prices(realtime_prices, last_prices)
         
-        # 4. Anormal düşüşleri kontrol et
-        anomalies = check_for_anomalies(realtime_prices)
+        # 6. Anormal dususleri kontrol et
+        anomalies = check_for_anomalies(realtime_prices, last_prices)
         
         if anomalies:
-            logger.warning(f"{len(anomalies)} anormal düşüş tespit edildi!")
+            logger.warning(f"{len(anomalies)} anomali tespit edildi!")
             for a in anomalies:
                 logger.warning(f"  {a['symbol']}: {a['change_percent']}% ({a['alert_type']})")
-            
-            # Email gönder
             send_alert_email(anomalies)
         else:
-            logger.info("Anormal düşüş tespit edilmedi.")
+            logger.info("Anormal dusus yok.")
         
-        # 5. İşlemi logla
-        duration = (datetime.now() - start_time).total_seconds()
+        # 7. Islem logu
+        duration = (datetime.now(est) - start_time).total_seconds()
+        market_state = realtime_prices[0].get('market_state', 'UNKNOWN') if realtime_prices else 'UNKNOWN'
         log_fetch_operation(
             'REALTIME',
+            market_state,
             len(NASDAQ_100_SYMBOLS),
             records_added,
+            records_skipped,
             "; ".join(errors) if errors else None,
             duration
         )
         
-        # 6. Özet bilgi
+        # 8. Ozet
         logger.info("=" * 60)
-        logger.info(f"ÖZET:")
-        logger.info(f"  - Çekilen hisse: {len(realtime_prices)}")
-        logger.info(f"  - Kaydedilen: {records_added}")
-        logger.info(f"  - Tespit edilen anomali: {len(anomalies)}")
-        logger.info(f"  - Süre: {duration:.2f} saniye")
+        logger.info(f"SUMMARY:")
+        logger.info(f"  - Fetched: {len(realtime_prices)} symbols")
+        logger.info(f"  - Saved: {records_added} (new/changed prices)")
+        logger.info(f"  - Skipped: {records_skipped} (unchanged prices)")
+        logger.info(f"  - Anomalies: {len(anomalies)}")
+        logger.info(f"  - Duration: {duration:.2f}s")
         logger.info("=" * 60)
         
     except Exception as e:
-        logger.error(f"Kritik hata: {e}")
+        logger.error(f"Critical error: {e}")
+        import traceback
+        traceback.print_exc()
         errors.append(str(e))
         raise
 
