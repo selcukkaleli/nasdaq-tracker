@@ -1,34 +1,70 @@
 # NASDAQ-100 Real-Time Stock Tracker
 
-An automated system that tracks NASDAQ-100 stocks using Yahoo Finance API, stores real-time price data in SQLite, and sends email alerts when abnormal price drops are detected.
+An automated system that tracks NASDAQ-100 stocks using Yahoo Finance API, stores real-time price data in SQLite, and sends email alerts when abnormal price drops are detected relative to the market benchmark (QQQ).
 
 ## Features
 
 - Real-time price tracking for NASDAQ-100 stocks (every 10 minutes during market hours)
+- Smart benchmark comparison using QQQ (NASDAQ-100 ETF)
+- Filters out market-wide movements to detect true anomalies
 - Smart data storage: only saves when prices actually change
 - All timestamps in EST (America/New_York) for consistency with NASDAQ trading hours
-- Dual alert system: daily drops and intraday drops
+- Multiple alert types: relative drops, absolute drops, and hourly drops
+- Spam prevention: same alert type suppressed for configurable duration
 - Email notifications for significant price movements
 - Full automation via GitHub Actions
-- Historical data accumulation for machine learning applications
 
 ## How It Works
 
 The tracker runs every 10 minutes during NYSE/NASDAQ market hours (Mon-Fri, 09:30-16:00 EST) and:
 
-1. Fetches current market prices from Yahoo Finance
-2. Compares against previous close (daily drop detection)
-3. Compares against last recorded price (intraday drop detection)
-4. Saves only if price has changed (avoids duplicate data)
-5. Sends email alert if drop exceeds threshold
+1. Fetches current market prices from Yahoo Finance (including QQQ benchmark)
+2. Calculates benchmark (QQQ) daily change
+3. Compares each stock's movement relative to the benchmark
+4. Alerts only when a stock drops significantly more than the market
+5. Saves price data only if changed (avoids duplicate data)
 
-The system automatically skips execution during weekends and outside market hours to conserve GitHub Actions minutes.
+### Alert Logic
+
+| Scenario | QQQ | Stock | Relative | Alert? |
+|----------|-----|-------|----------|--------|
+| Market down, stock follows | -3% | -4% | -1% | No |
+| Market down, stock crashes | -2% | -7% | -5% | Yes (RELATIVE_DROP) |
+| Market flat, stock drops | +0.5% | -6% | -6.5% | Yes (ABSOLUTE_DROP) |
+| Sudden intraday drop | N/A | -4% in 10min | N/A | Yes (HOURLY_DROP) |
+
+## Alert Types
+
+| Type | Description | Default Threshold |
+|------|-------------|-------------------|
+| RELATIVE_DROP | Stock dropped more than QQQ by threshold | 3% |
+| ABSOLUTE_DROP | Stock dropped significantly while market is flat | 5% (when QQQ > -2%) |
+| HOURLY_DROP | Sudden drop since last recorded price | 3% |
+
+## Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| DROP_THRESHOLD | 5.0 | Absolute daily drop threshold (%) |
+| HOURLY_DROP_THRESHOLD | 3.0 | Intraday drop threshold (%) |
+| RELATIVE_DROP_THRESHOLD | 3.0 | Drop vs benchmark threshold (%) |
+| MIN_PRICE_FOR_ALERT | 5.0 | Ignore stocks below this price ($) |
+| MIN_ABS_MOVE_DOLLAR | 0.50 | Ignore moves smaller than this ($) |
+| MIN_MINUTES_BETWEEN_SAME_ALERT | 60 | Spam prevention window (minutes) |
+
+### GitHub Secrets
+
+| Secret Name | Description |
+|-------------|-------------|
+| EMAIL_SENDER | Sender email address (Gmail recommended) |
+| EMAIL_PASSWORD | Gmail App Password |
+| EMAIL_RECIPIENT | Email address to receive alerts |
 
 ## Database Schema
 
 ### realtime_prices
-
-Stores price snapshots taken every 10 minutes during market hours.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -43,37 +79,36 @@ Stores price snapshots taken every 10 minutes during market hours.
 | market_state | TEXT | REGULAR, PRE, POST, or CLOSED |
 | fetch_timestamp | DATETIME | When the data was fetched (EST) |
 
-### fetch_logs
-
-Tracks each fetch operation for monitoring.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| id | INTEGER | Primary key |
-| fetch_timestamp | DATETIME | Operation timestamp (EST) |
-| fetch_type | TEXT | REALTIME, SKIPPED |
-| market_state | TEXT | Market state at fetch time |
-| symbols_fetched | INTEGER | Number of symbols processed |
-| records_added | INTEGER | Records inserted (price changed) |
-| records_skipped | INTEGER | Records skipped (price unchanged) |
-| errors | TEXT | Any errors encountered |
-| duration_seconds | REAL | Operation duration |
-
 ### alerts
-
-Logs all triggered alerts.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | id | INTEGER | Primary key |
 | symbol | TEXT | Stock ticker symbol |
-| alert_type | TEXT | DAILY_DROP or HOURLY_DROP |
+| alert_type | TEXT | RELATIVE_DROP, ABSOLUTE_DROP, or HOURLY_DROP |
 | alert_message | TEXT | Description of the alert |
-| price_change_percent | REAL | Percentage change |
+| price_change_percent | REAL | Stock's percentage change |
+| benchmark_change_percent | REAL | QQQ's percentage change |
+| relative_change_percent | REAL | Difference (stock - benchmark) |
 | current_price | REAL | Price at alert time |
 | previous_price | REAL | Reference price |
 | created_at | DATETIME | Alert timestamp (EST) |
 | email_sent | BOOLEAN | Whether email was sent |
+
+### fetch_logs
+
+| Column | Type | Description |
+|--------|------|-------------|
+| id | INTEGER | Primary key |
+| fetch_timestamp | DATETIME | Operation timestamp (EST) |
+| fetch_type | TEXT | REALTIME or SKIPPED |
+| market_state | TEXT | Market state at fetch time |
+| symbols_fetched | INTEGER | Number of symbols processed |
+| records_added | INTEGER | Records inserted |
+| records_skipped | INTEGER | Records skipped (unchanged) |
+| benchmark_change | REAL | QQQ daily change (%) |
+| errors | TEXT | Any errors encountered |
+| duration_seconds | REAL | Operation duration |
 
 ## Installation
 
@@ -86,42 +121,34 @@ cd nasdaq-tracker
 
 ### 2. Configure GitHub Secrets
 
-Navigate to repository Settings, then Secrets and variables, then Actions. Add the following secrets:
+Navigate to Settings > Secrets and variables > Actions and add:
 
-| Secret Name | Description |
-|-------------|-------------|
-| EMAIL_SENDER | Sender email address (Gmail recommended) |
-| EMAIL_PASSWORD | Gmail App Password (not your regular password) |
-| EMAIL_RECIPIENT | Email address to receive alerts |
+- EMAIL_SENDER
+- EMAIL_PASSWORD
+- EMAIL_RECIPIENT
 
 ### 3. Create Gmail App Password
 
-1. Go to Google Account and enable 2-Step Verification
-2. Navigate to Security, then App passwords
-3. Select Mail and Other, enter a name like "NASDAQ Tracker"
-4. Copy the 16-character password and use it as EMAIL_PASSWORD
+1. Enable 2-Step Verification in Google Account
+2. Go to Security > App passwords
+3. Generate password for "Mail"
+4. Use the 16-character password as EMAIL_PASSWORD
 
 ### 4. Configure Variables (Optional)
 
-Navigate to repository Settings, then Secrets and variables, then Actions, then Variables tab:
-
-| Variable Name | Default | Description |
-|---------------|---------|-------------|
-| DROP_THRESHOLD | 5.0 | Daily drop threshold percentage |
-| HOURLY_DROP_THRESHOLD | 3.0 | Intraday drop threshold percentage |
+In Settings > Secrets and variables > Actions > Variables, you can customize thresholds.
 
 ## Usage
 
 ### Automatic Execution
 
-GitHub Actions runs the tracker every 10 minutes during market hours:
-
-- Schedule: Every 10 minutes, Monday-Friday, 09:30-16:00 EST (14:30-21:00 UTC)
-- Skips weekends and outside market hours automatically
+GitHub Actions runs every 10 minutes during market hours:
+- Monday-Friday
+- 09:30-16:00 EST (14:30-21:00 UTC)
 
 ### Manual Execution
 
-1. Go to the Actions tab in your repository
+1. Go to Actions tab
 2. Select "NASDAQ Tracker" workflow
 3. Click "Run workflow"
 
@@ -140,39 +167,43 @@ import pandas as pd
 
 conn = sqlite3.connect('nasdaq_data.db')
 
-# Get all real-time price history (only actual price changes)
+# Get price history with benchmark comparison
 df = pd.read_sql_query('''
-    SELECT symbol, price, previous_close, volume, market_state, fetch_timestamp
-    FROM realtime_prices
-    ORDER BY symbol, fetch_timestamp
+    SELECT 
+        r1.symbol,
+        r1.price,
+        r1.previous_close,
+        r1.fetch_timestamp,
+        r2.price as qqq_price,
+        r2.previous_close as qqq_prev_close
+    FROM realtime_prices r1
+    LEFT JOIN realtime_prices r2 
+        ON r2.symbol = 'QQQ' 
+        AND r2.fetch_timestamp = r1.fetch_timestamp
+    WHERE r1.symbol != 'QQQ'
+    ORDER BY r1.symbol, r1.fetch_timestamp
 ''', conn)
 
-# Get prices for a specific stock during regular market hours only
-aapl = pd.read_sql_query('''
-    SELECT price, volume, fetch_timestamp 
-    FROM realtime_prices 
-    WHERE symbol = 'AAPL' AND market_state = 'REGULAR'
-    ORDER BY fetch_timestamp
-''', conn)
-
-# Calculate returns
-aapl['return'] = aapl['price'].pct_change()
+# Calculate relative performance
+df['stock_change'] = (df['price'] - df['previous_close']) / df['previous_close'] * 100
+df['qqq_change'] = (df['qqq_price'] - df['qqq_prev_close']) / df['qqq_prev_close'] * 100
+df['relative_change'] = df['stock_change'] - df['qqq_change']
 
 conn.close()
 ```
 
 ## Tracked Stocks
 
-The tracker monitors all NASDAQ-100 components:
+QQQ (benchmark) plus all NASDAQ-100 components:
 
 AAPL, MSFT, AMZN, NVDA, META, GOOGL, GOOG, TSLA, AVGO, COST, NFLX, AMD, PEP, ADBE, CSCO, TMUS, INTC, CMCSA, TXN, QCOM, INTU, AMGN, HON, AMAT, ISRG, BKNG, SBUX, VRTX, MDLZ, GILD, ADP, REGN, ADI, LRCX, PANW, KLAC, SNPS, MELI, CDNS, ASML, MAR, ABNB, PYPL, CRWD, ORLY, CTAS, MNST, NXPI, CSX, MRVL, PCAR, WDAY, CEG, ROP, ADSK, CPRT, DXCM, FTNT, CHTR, AEP, PAYX, ODFL, MCHP, KDP, KHC, FAST, ROST, AZN, EXC, EA, VRSK, CTSH, LULU, GEHC, IDXX, XEL, CCEP, DDOG, CSGP, BKR, TTWO, ANSS, ON, ZS, GFS, FANG, CDW, BIIB, ILMN, WBD, MDB, TEAM, MRNA, DLTR, SIRI, LCID, RIVN, ARM, SMCI, COIN
 
 ## Resource Usage
 
-- GitHub Actions free tier: 2000 minutes per month
-- Each run: approximately 1 minute
-- Schedule: ~42 runs per day, only on trading days
-- Monthly usage: approximately 900 minutes (well within free tier)
+- GitHub Actions free tier: 2000 minutes/month
+- Each run: ~1 minute
+- Schedule: ~42 runs/day on trading days
+- Monthly usage: ~900 minutes
 
 ## Market Hours Reference
 
