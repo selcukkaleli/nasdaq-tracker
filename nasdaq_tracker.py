@@ -124,10 +124,11 @@ def get_market_status() -> dict:
 
 
 def init_database():
-    """Veritabani tablolarini olusturur."""
+    """Veritabani tablolarini olusturur veya gunceller."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # Anlik fiyat tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS realtime_prices (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -143,6 +144,7 @@ def init_database():
         )
     ''')
     
+    # Fetch log tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS fetch_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -158,6 +160,7 @@ def init_database():
         )
     ''')
     
+    # Alertler tablosu
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS alerts (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -174,6 +177,24 @@ def init_database():
         )
     ''')
     
+    # Eksik kolonlari ekle (eski DB uyumlulugu icin)
+    def add_column_if_not_exists(table, column, col_type):
+        try:
+            cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+            logger.info(f"Kolon eklendi: {table}.{column}")
+        except sqlite3.OperationalError:
+            pass  # Kolon zaten var
+    
+    # alerts tablosu icin yeni kolonlar
+    add_column_if_not_exists('alerts', 'benchmark_change_percent', 'REAL')
+    add_column_if_not_exists('alerts', 'relative_change_percent', 'REAL')
+    
+    # fetch_logs tablosu icin yeni kolonlar
+    add_column_if_not_exists('fetch_logs', 'benchmark_change', 'REAL')
+    add_column_if_not_exists('fetch_logs', 'records_skipped', 'INTEGER')
+    add_column_if_not_exists('fetch_logs', 'market_state', 'TEXT')
+    
+    # Indeksler
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_symbol ON realtime_prices(symbol)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_timestamp ON realtime_prices(fetch_timestamp)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_rt_symbol_timestamp ON realtime_prices(symbol, fetch_timestamp)')
