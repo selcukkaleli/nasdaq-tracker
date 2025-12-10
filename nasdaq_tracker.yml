@@ -2,14 +2,21 @@ name: NASDAQ Tracker
 
 on:
   schedule:
-    # Her saat başı çalışır (UTC)
-    # NYSE açık saatleri: 14:30-21:00 UTC (09:30-16:00 EST)
-    # Pre-market: 09:00-14:30 UTC
-    # Türkiye saati ile yaklaşık 17:30-00:00 arası
-    - cron: '0 * * * *'
+    # Run every 10 minutes during NYSE/NASDAQ market hours (Mon-Fri, 09:30-16:00 EST)
+    # EST = UTC-5 (winter) or UTC-4 (summer/DST)
+    # Using UTC 14:30-21:00 to cover regular market hours
+    # Minutes: 0,10,20,30,40,50 | Hours: 14-20 UTC | Days: Mon-Fri (1-5)
+    - cron: '*/10 14-20 * * 1-5'
+    
+    # Also run at market open (14:30 UTC) and close (21:00 UTC)
+    - cron: '30 14 * * 1-5'
+    - cron: '0 21 * * 1-5'
   
-  # Manuel tetikleme için
+  # Manual trigger
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   fetch-nasdaq-data:
@@ -30,21 +37,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
       
-      - name: Download existing database
-        continue-on-error: true
-        run: |
-          # Eğer önceki veritabanı varsa indir
-          if [ -f nasdaq_data.db ]; then
-            echo "Mevcut veritabanı bulundu"
-          fi
-      
       - name: Restore database from cache
         uses: actions/cache@v4
         with:
           path: nasdaq_data.db
-          key: nasdaq-db-${{ github.run_id }}
+          key: nasdaq-db-v4-${{ github.run_id }}
           restore-keys: |
-            nasdaq-db-
+            nasdaq-db-v4-
       
       - name: Run NASDAQ Tracker
         env:
@@ -52,22 +51,22 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           EMAIL_RECIPIENT: ${{ secrets.EMAIL_RECIPIENT }}
           DROP_THRESHOLD: ${{ vars.DROP_THRESHOLD || '5.0' }}
+          HOURLY_DROP_THRESHOLD: ${{ vars.HOURLY_DROP_THRESHOLD || '3.0' }}
         run: |
           python nasdaq_tracker.py
       
       - name: Upload database artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nasdaq-database
+          name: nasdaq-database-${{ github.run_number }}
           path: nasdaq_data.db
           retention-days: 90
       
-      - name: Commit database to repo (optional)
+      - name: Commit database to repo
         run: |
           git config --local user.email "github-actions[bot]@users.noreply.github.com"
           git config --local user.name "github-actions[bot]"
           
-          # Veritabanını repo'ya ekle (opsiyonel - büyük dosyalar için önerilmez)
           if [ -f nasdaq_data.db ]; then
             # Dosya boyutunu kontrol et (50MB'dan küçükse commit et)
             FILE_SIZE=$(stat -c%s "nasdaq_data.db" 2>/dev/null || stat -f%z "nasdaq_data.db")
