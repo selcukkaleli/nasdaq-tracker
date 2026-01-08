@@ -1,17 +1,16 @@
 # NASDAQ-100 Real-Time Stock Tracker
 
-An automated system that tracks NASDAQ-100 stocks using Yahoo Finance API, stores real-time price data in SQLite, and sends email alerts when abnormal price drops are detected relative to the market benchmark (QQQ).
+An automated system that tracks NASDAQ-100 stocks using Yahoo Finance API, stores real-time price data in SQLite, and sends email alerts only when significant price drops are detected relative to the market benchmark (QQQ).
 
 ## Features
 
 - Real-time price tracking for NASDAQ-100 stocks (every 10 minutes during market hours)
 - Smart benchmark comparison using QQQ (NASDAQ-100 ETF)
-- Filters out market-wide movements to detect true anomalies
+- High thresholds to alert only on significant drops (flash crashes, major news events)
+- Filters out normal market movements and noise
 - Smart data storage: only saves when prices actually change
 - All timestamps in EST (America/New_York) for consistency with NASDAQ trading hours
-- Multiple alert types: relative drops, absolute drops, and hourly drops
 - Spam prevention: same alert type suppressed for configurable duration
-- Email notifications for significant price movements
 - Full automation via GitHub Actions
 
 ## How It Works
@@ -26,20 +25,29 @@ The tracker runs every 10 minutes during NYSE/NASDAQ market hours (Mon-Fri, 09:3
 
 ### Alert Logic
 
+The system uses high thresholds to avoid noise and only alert on significant events:
+
 | Scenario | QQQ | Stock | Relative | Alert? |
 |----------|-----|-------|----------|--------|
-| Market down, stock follows | -3% | -4% | -1% | No |
-| Market down, stock crashes | -2% | -7% | -5% | Yes (RELATIVE_DROP) |
-| Market flat, stock drops | +0.5% | -6% | -6.5% | Yes (ABSOLUTE_DROP) |
-| Sudden intraday drop | N/A | -4% in 10min | N/A | Yes (HOURLY_DROP) |
+| Normal market volatility | -2% | -5% | -3% | No |
+| Stock underperforming | -1% | -6% | -5% | No |
+| Significant drop | -1% | -10% | -9% | Yes (RELATIVE_DROP) |
+| Flash crash | +0.5% | -12% | -12.5% | Yes (ABSOLUTE_DROP) |
+| Sudden collapse | N/A | -8% in 10min | N/A | Yes (HOURLY_DROP) |
 
 ## Alert Types
 
 | Type | Description | Default Threshold |
 |------|-------------|-------------------|
-| RELATIVE_DROP | Stock dropped more than QQQ by threshold | 3% |
-| ABSOLUTE_DROP | Stock dropped significantly while market is flat | 5% (when QQQ > -2%) |
-| HOURLY_DROP | Sudden drop since last recorded price | 3% |
+| RELATIVE_DROP | Stock dropped significantly more than QQQ | 8% below QQQ |
+| ABSOLUTE_DROP | Stock dropped significantly while market is flat | 10% (when QQQ > -2%) |
+| HOURLY_DROP | Sudden drop since last recorded price | 7% |
+
+These thresholds are designed to catch events like:
+- Flash crashes (e.g., 2010 Flash Crash)
+- Company-specific disasters (earnings misses, fraud revelations)
+- Black swan events
+- Trading halts and circuit breakers
 
 ## Configuration
 
@@ -47,9 +55,9 @@ The tracker runs every 10 minutes during NYSE/NASDAQ market hours (Mon-Fri, 09:3
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| DROP_THRESHOLD | 5.0 | Absolute daily drop threshold (%) |
-| HOURLY_DROP_THRESHOLD | 3.0 | Intraday drop threshold (%) |
-| RELATIVE_DROP_THRESHOLD | 3.0 | Drop vs benchmark threshold (%) |
+| DROP_THRESHOLD | 10.0 | Absolute daily drop threshold (%) |
+| HOURLY_DROP_THRESHOLD | 7.0 | Intraday drop threshold (%) |
+| RELATIVE_DROP_THRESHOLD | 8.0 | Drop vs benchmark threshold (%) |
 | MIN_PRICE_FOR_ALERT | 5.0 | Ignore stocks below this price ($) |
 | MIN_ABS_MOVE_DOLLAR | 0.50 | Ignore moves smaller than this ($) |
 | MIN_MINUTES_BETWEEN_SAME_ALERT | 60 | Spam prevention window (minutes) |
@@ -136,7 +144,7 @@ Navigate to Settings > Secrets and variables > Actions and add:
 
 ### 4. Configure Variables (Optional)
 
-In Settings > Secrets and variables > Actions > Variables, you can customize thresholds.
+In Settings > Secrets and variables > Actions > Variables, you can customize thresholds if needed.
 
 ## Usage
 
@@ -189,6 +197,9 @@ df['stock_change'] = (df['price'] - df['previous_close']) / df['previous_close']
 df['qqq_change'] = (df['qqq_price'] - df['qqq_prev_close']) / df['qqq_prev_close'] * 100
 df['relative_change'] = df['stock_change'] - df['qqq_change']
 
+# Find historical anomalies (for backtesting)
+anomalies = df[df['relative_change'] < -8]
+
 conn.close()
 ```
 
@@ -212,6 +223,16 @@ AAPL, MSFT, AMZN, NVDA, META, GOOGL, GOOG, TSLA, AVGO, COST, NFLX, AMD, PEP, ADB
 | EST | 09:30 | 16:00 |
 | UTC | 14:30 | 21:00 |
 | Turkey (TRT) | 17:30 | 00:00 |
+
+## Historical Context
+
+This system is designed to catch significant market events like:
+
+- **2010 Flash Crash**: Dow Jones dropped ~9% in minutes, some stocks fell 60%+
+- **2015 Flash Crash**: Dow dropped 1,000+ points at open
+- **Individual stock crashes**: Earnings disasters, fraud revelations, FDA rejections
+
+With the default thresholds (8-10%), you'll receive alerts only for these exceptional events, not normal market volatility.
 
 ## License
 
