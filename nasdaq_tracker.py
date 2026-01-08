@@ -62,13 +62,13 @@ EMAIL_RECIPIENT = os.environ.get('EMAIL_RECIPIENT', '')
 SMTP_SERVER = os.environ.get('SMTP_SERVER', 'smtp.gmail.com')
 SMTP_PORT = int(os.environ.get('SMTP_PORT', '587'))
 
-# Dusus esikleri
-DROP_THRESHOLD = float(os.environ.get('DROP_THRESHOLD', '5.0'))
-HOURLY_DROP_THRESHOLD = float(os.environ.get('HOURLY_DROP_THRESHOLD', '3.0'))
+# Dusus esikleri - SADECE CIDDI DUSUSLER
+DROP_THRESHOLD = float(os.environ.get('DROP_THRESHOLD', '10.0'))  # %10 mutlak dusus
+HOURLY_DROP_THRESHOLD = float(os.environ.get('HOURLY_DROP_THRESHOLD', '7.0'))  # %7 anlik dusus
 
 # Benchmark goreceli dusus esigi
 # Hisse, QQQ'dan bu kadar fazla dustuyse alert uret
-RELATIVE_DROP_THRESHOLD = float(os.environ.get('RELATIVE_DROP_THRESHOLD', '3.0'))
+RELATIVE_DROP_THRESHOLD = float(os.environ.get('RELATIVE_DROP_THRESHOLD', '8.0'))  # %8 QQQ'ya gore
 
 # Ek filtreler
 MIN_PRICE_FOR_ALERT = float(os.environ.get('MIN_PRICE_FOR_ALERT', '5.0'))
